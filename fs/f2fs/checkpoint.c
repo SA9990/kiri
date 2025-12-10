@@ -1142,24 +1142,17 @@ static void __prepare_cp_block(struct f2fs_sb_info *sbi)
 
 static bool __need_flush_quota(struct f2fs_sb_info *sbi)
 {
-	bool ret = false;
-
 	if (!is_journalled_quota(sbi))
 		return false;
-
-	down_write(&sbi->quota_sem);
-	if (is_sbi_flag_set(sbi, SBI_QUOTA_SKIP_FLUSH)) {
-		ret = false;
-	} else if (is_sbi_flag_set(sbi, SBI_QUOTA_NEED_REPAIR)) {
-		ret = false;
-	} else if (is_sbi_flag_set(sbi, SBI_QUOTA_NEED_FLUSH)) {
-		clear_sbi_flag(sbi, SBI_QUOTA_NEED_FLUSH);
-		ret = true;
-	} else if (get_pages(sbi, F2FS_DIRTY_QDATA)) {
-		ret = true;
-	}
-	up_write(&sbi->quota_sem);
-	return ret;
+	if (is_sbi_flag_set(sbi, SBI_QUOTA_SKIP_FLUSH))
+		return false;
+	if (is_sbi_flag_set(sbi, SBI_QUOTA_NEED_REPAIR))
+		return false;
+	if (is_sbi_flag_set(sbi, SBI_QUOTA_NEED_FLUSH))
+		return true;
+	if (get_pages(sbi, F2FS_DIRTY_QDATA))
+		return true;
+	return false;
 }
 
 /*
@@ -1180,22 +1173,26 @@ static int block_operations(struct f2fs_sb_info *sbi)
 	f2fs_flush_inline_data(sbi);
 
 retry_flush_quotas:
-	f2fs_lock_all(sbi);
 	if (__need_flush_quota(sbi)) {
 		int locked;
 
 		if (++cnt > DEFAULT_RETRY_QUOTA_FLUSH_COUNT) {
 			set_sbi_flag(sbi, SBI_QUOTA_SKIP_FLUSH);
-			set_sbi_flag(sbi, SBI_QUOTA_NEED_FLUSH);
+			f2fs_lock_all(sbi);
 			goto retry_flush_dents;
 		}
-		f2fs_unlock_all(sbi);
+		clear_sbi_flag(sbi, SBI_QUOTA_NEED_FLUSH);
 
 		/* only failed during mount/umount/freeze/quotactl */
 		locked = down_read_trylock(&sbi->sb->s_umount);
 		f2fs_quota_sync(sbi->sb, -1);
 		if (locked)
 			up_read(&sbi->sb->s_umount);
+	}
+
+	f2fs_lock_all(sbi);
+	if (__need_flush_quota(sbi)) {
+		f2fs_unlock_all(sbi);
 		cond_resched();
 		goto retry_flush_quotas;
 	}
@@ -1216,6 +1213,12 @@ retry_flush_dents:
 	 * until finishing nat/sit flush. inode->i_blocks can be updated.
 	 */
 	down_write(&sbi->node_change);
+
+	if (__need_flush_quota(sbi)) {
+		up_write(&sbi->node_change);
+		f2fs_unlock_all(sbi);
+		goto retry_flush_quotas;
+	}
 
 	if (get_pages(sbi, F2FS_DIRTY_IMETA)) {
 		up_write(&sbi->node_change);
@@ -1264,8 +1267,6 @@ void f2fs_wait_on_all_pages(struct f2fs_sb_info *sbi, int type)
 	DEFINE_WAIT(wait);
 
 	for (;;) {
-		prepare_to_wait(&sbi->cp_wait, &wait, TASK_UNINTERRUPTIBLE);
-
 		if (!get_pages(sbi, type))
 			break;
 
@@ -1275,6 +1276,10 @@ void f2fs_wait_on_all_pages(struct f2fs_sb_info *sbi, int type)
 		if (type == F2FS_DIRTY_META)
 			f2fs_sync_meta_pages(sbi, META, LONG_MAX,
 							FS_CP_META_IO);
+		else if (type == F2FS_WB_CP_DATA)
+			f2fs_submit_merged_write(sbi, DATA);
+
+		prepare_to_wait(&sbi->cp_wait, &wait, TASK_UNINTERRUPTIBLE);
 		io_schedule_timeout(DEFAULT_IO_TIMEOUT);
 	}
 	finish_wait(&sbi->cp_wait, &wait);
@@ -1400,6 +1405,10 @@ static int do_checkpoint(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 
 	/* Flush all the NAT/SIT pages */
 	f2fs_sync_meta_pages(sbi, META, LONG_MAX, FS_CP_META_IO);
+	if (get_pages(sbi, F2FS_DIRTY_META) && !f2fs_cp_error(sbi)) {
+		WARN_ON(1);
+		set_sbi_flag(sbi, SBI_NEED_FSCK);
+	}
 
 	/* start to update checkpoint, cp ver is already updated previously */
 	ckpt->elapsed_time = cpu_to_le64(get_mtime(sbi, true));
@@ -1504,6 +1513,10 @@ static int do_checkpoint(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 
 	/* Here, we have one bio having CP pack except cp pack 2 page */
 	f2fs_sync_meta_pages(sbi, META, LONG_MAX, FS_CP_META_IO);
+	if (get_pages(sbi, F2FS_DIRTY_META) && !f2fs_cp_error(sbi)) {
+		WARN_ON(1);
+		set_sbi_flag(sbi, SBI_NEED_FSCK);
+	}
 	/* Wait for all dirty meta pages to be submitted for IO */
 	f2fs_wait_on_all_pages(sbi, F2FS_DIRTY_META);
 

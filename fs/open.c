@@ -34,8 +34,18 @@
 
 #include "internal.h"
 
-int do_truncate(struct dentry *dentry, loff_t length, unsigned int time_attrs,
-	struct file *filp)
+//#undef CONFIG_UCI
+
+#ifdef CONFIG_UCI
+#include <linux/uci/uci.h>
+#endif
+
+#ifdef CONFIG_UCI
+//#define KADAWAY
+#endif
+
+int do_truncate2(struct vfsmount *mnt, struct dentry *dentry, loff_t length,
+		unsigned int time_attrs, struct file *filp)
 {
 	int ret;
 	struct iattr newattrs;
@@ -60,17 +70,24 @@ int do_truncate(struct dentry *dentry, loff_t length, unsigned int time_attrs,
 
 	inode_lock(dentry->d_inode);
 	/* Note any delegations or leases have already been broken: */
-	ret = notify_change(dentry, &newattrs, NULL);
+	ret = notify_change2(mnt, dentry, &newattrs, NULL);
 	inode_unlock(dentry->d_inode);
 	return ret;
+}
+int do_truncate(struct dentry *dentry, loff_t length, unsigned int time_attrs,
+	struct file *filp)
+{
+	return do_truncate2(NULL, dentry, length, time_attrs, filp);
 }
 
 long vfs_truncate(const struct path *path, loff_t length)
 {
 	struct inode *inode;
+	struct vfsmount *mnt;
 	long error;
 
 	inode = path->dentry->d_inode;
+	mnt = path->mnt;
 
 	/* For directories it's -EISDIR, for other non-regulars - -EINVAL */
 	if (S_ISDIR(inode->i_mode))
@@ -82,7 +99,7 @@ long vfs_truncate(const struct path *path, loff_t length)
 	if (error)
 		goto out;
 
-	error = inode_permission(inode, MAY_WRITE);
+	error = inode_permission2(mnt, inode, MAY_WRITE);
 	if (error)
 		goto mnt_drop_write_and_out;
 
@@ -106,7 +123,7 @@ long vfs_truncate(const struct path *path, loff_t length)
 	if (!error)
 		error = security_path_truncate(path);
 	if (!error)
-		error = do_truncate(path->dentry, length, 0, NULL);
+		error = do_truncate2(mnt, path->dentry, length, 0, NULL);
 
 put_write_and_out:
 	put_write_access(inode);
@@ -155,6 +172,7 @@ long do_sys_ftruncate(unsigned int fd, loff_t length, int small)
 {
 	struct inode *inode;
 	struct dentry *dentry;
+	struct vfsmount *mnt;
 	struct fd f;
 	int error;
 
@@ -171,6 +189,7 @@ long do_sys_ftruncate(unsigned int fd, loff_t length, int small)
 		small = 0;
 
 	dentry = f.file->f_path.dentry;
+	mnt = f.file->f_path.mnt;
 	inode = dentry->d_inode;
 	error = -EINVAL;
 	if (!S_ISREG(inode->i_mode) || !(f.file->f_mode & FMODE_WRITE))
@@ -191,7 +210,7 @@ long do_sys_ftruncate(unsigned int fd, loff_t length, int small)
 	if (!error)
 		error = security_path_truncate(&f.file->f_path);
 	if (!error)
-		error = do_truncate(dentry, length, ATTR_MTIME|ATTR_CTIME, f.file);
+		error = do_truncate2(mnt, dentry, length, ATTR_MTIME|ATTR_CTIME, f.file);
 	sb_end_write(inode->i_sb);
 out_putf:
 	fdput(f);
@@ -350,6 +369,7 @@ long do_faccessat(int dfd, const char __user *filename, int mode)
 	struct cred *override_cred;
 	struct path path;
 	struct inode *inode;
+	struct vfsmount *mnt;
 	int res;
 	unsigned int lookup_flags = LOOKUP_FOLLOW;
 
@@ -399,6 +419,7 @@ retry:
 		goto out;
 
 	inode = d_backing_inode(path.dentry);
+	mnt = path.mnt;
 
 	if ((mode & MAY_EXEC) && S_ISREG(inode->i_mode)) {
 		/*
@@ -410,7 +431,7 @@ retry:
 			goto out_path_release;
 	}
 
-	res = inode_permission(inode, mode | MAY_ACCESS);
+	res = inode_permission2(mnt, inode, mode | MAY_ACCESS);
 	/* SuS v2 requires we report a read only fs too */
 	if (res || !(mode & S_IWOTH) || special_file(inode->i_mode))
 		goto out_path_release;
@@ -459,7 +480,7 @@ retry:
 	if (error)
 		goto out;
 
-	error = inode_permission(path.dentry->d_inode, MAY_EXEC | MAY_CHDIR);
+	error = inode_permission2(path.mnt, path.dentry->d_inode, MAY_EXEC | MAY_CHDIR);
 	if (error)
 		goto dput_and_out;
 
@@ -493,7 +514,8 @@ SYSCALL_DEFINE1(fchdir, unsigned int, fd)
 	if (!d_can_lookup(f.file->f_path.dentry))
 		goto out_putf;
 
-	error = inode_permission(file_inode(f.file), MAY_EXEC | MAY_CHDIR);
+	error = inode_permission2(f.file->f_path.mnt, file_inode(f.file),
+				MAY_EXEC | MAY_CHDIR);
 	if (!error)
 		set_fs_pwd(current->fs, &f.file->f_path);
 out_putf:
@@ -512,7 +534,7 @@ retry:
 	if (error)
 		goto out;
 
-	error = inode_permission(path.dentry->d_inode, MAY_EXEC | MAY_CHDIR);
+	error = inode_permission2(path.mnt, path.dentry->d_inode, MAY_EXEC | MAY_CHDIR);
 	if (error)
 		goto dput_and_out;
 
@@ -557,7 +579,7 @@ retry_deleg:
 		goto out_unlock;
 	newattrs.ia_mode = (mode & S_IALLUGO) | (inode->i_mode & ~S_IALLUGO);
 	newattrs.ia_valid = ATTR_MODE | ATTR_CTIME;
-	error = notify_change(path->dentry, &newattrs, &delegated_inode);
+	error = notify_change2(path->mnt, path->dentry, &newattrs, &delegated_inode);
 out_unlock:
 	inode_unlock(inode);
 	if (delegated_inode) {
@@ -648,7 +670,7 @@ retry_deleg:
 	inode_lock(inode);
 	error = security_path_chown(path, uid, gid);
 	if (!error)
-		error = notify_change(path->dentry, &newattrs, &delegated_inode);
+		error = notify_change2(path->mnt, path->dentry, &newattrs, &delegated_inode);
 	inode_unlock(inode);
 	if (delegated_inode) {
 		error = break_deleg_wait(&delegated_inode);
@@ -738,6 +760,10 @@ static int do_dentry_open(struct file *f,
 {
 	static const struct file_operations empty_fops = {};
 	int error;
+#ifdef CONFIG_UCI
+	bool uci = false;
+	const char *name;
+#endif
 
 	path_get(&f->f_path);
 	f->f_inode = inode;
@@ -781,12 +807,39 @@ static int do_dentry_open(struct file *f,
 	}
 
 	error = security_file_open(f);
+#ifdef CONFIG_UCI
+	name = f->f_path.dentry->d_name.name;
+	uci = is_uci_file(name);
+	if (uci) {
+		char *tmp, *p = kmalloc(PATH_MAX, GFP_KERNEL);
+		if (p) {
+			tmp = d_path(&f->f_path, p, PATH_MAX);
+			if (!IS_ERR(tmp))
+			{
+				if (is_uci_path(tmp)) {
+					pr_debug("%s security override uci error to 0 %s \n",__func__,tmp);
+					error = 0;
+				}
+			}
+			kfree(p);
+		}
+	}
+#endif
 	if (error)
 		goto cleanup_all;
 
 	error = break_lease(locks_inode(f), f->f_flags);
 	if (error)
+#ifdef CONFIG_UCI
+	{
+		pr_debug("%s uci error at break_lease\n",__func__);
+		if (!uci) {
+#endif
 		goto cleanup_all;
+#ifdef CONFIG_UCI
+		}
+	}
+#endif
 
 	/* normally all 3 are set; ->open() can clear them if needed */
 	f->f_mode |= FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE;
@@ -795,7 +848,14 @@ static int do_dentry_open(struct file *f,
 	if (open) {
 		error = open(inode, f);
 		if (error)
+#ifdef CONFIG_UCI
+		{
+			pr_debug("%s uci error at open #1\n",__func__);
+#endif
 			goto cleanup_all;
+#ifdef CONFIG_UCI
+		}
+#endif
 	}
 	f->f_mode |= FMODE_OPENED;
 	if ((f->f_mode & (FMODE_READ | FMODE_WRITE)) == FMODE_READ)
@@ -811,6 +871,16 @@ static int do_dentry_open(struct file *f,
 	f->f_flags &= ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC);
 
 	file_ra_state_init(&f->f_ra, f->f_mapping->host->i_mapping);
+#ifdef CONFIG_UCI
+	if (uci) {
+		if (f->f_mode & FMODE_WRITE) {
+			pr_debug("%s filp may write, may open... %s\n",__func__,name);
+			notify_uci_file_write_opened(name);
+		} else {
+			pr_debug("%s filp not may write, may open... %s  %d\n",__func__,name,f->f_mode);
+		}
+	}
+#endif
 
 	/* NB: we're sure to have correct a_ops only after f_op->open */
 	if (f->f_flags & O_DIRECT) {
@@ -1032,6 +1102,13 @@ struct file *file_open_name(struct filename *name, int flags, umode_t mode)
 	return err ? ERR_PTR(err) : do_filp_open(AT_FDCWD, name, &op);
 }
 
+#ifdef KADAWAY
+extern bool is_kadaway(void);
+static const char * hosts_name = UCI_HOSTS_FILE;
+static const char * hosts_orig_name = "/system/etc/hosts";
+#define HOSTS_ORIG_LEN 19
+#endif
+
 /**
  * filp_open - open file and return file pointer
  *
@@ -1045,6 +1122,16 @@ struct file *file_open_name(struct filename *name, int flags, umode_t mode)
  */
 struct file *filp_open(const char *filename, int flags, umode_t mode)
 {
+#ifdef KADAWAY
+	if (is_kadaway())
+	{
+		if (!strcmp(filename,hosts_orig_name)) {
+			pr_debug("%s [kadaway] %s\n",__func__,filename);
+			filename = hosts_name;
+		}
+	}
+	{
+#endif
 	struct filename *name = getname_kernel(filename);
 	struct file *file = ERR_CAST(name);
 	
@@ -1053,22 +1140,67 @@ struct file *filp_open(const char *filename, int flags, umode_t mode)
 		putname(name);
 	}
 	return file;
+#ifdef KADAWAY
+	}
+#endif
 }
 EXPORT_SYMBOL(filp_open);
 
 struct file *file_open_root(struct dentry *dentry, struct vfsmount *mnt,
 			    const char *filename, int flags, umode_t mode)
 {
+#ifdef KADAWAY
+	if (is_kadaway())
+	{
+		if (strstr(filename,"etc/hosts")) {
+			char *tmp, *p = kmalloc(PATH_MAX, GFP_KERNEL);
+			bool hijack = false;
+			pr_debug("%s [kadaway] %s\n",__func__,filename);
+			if (p) {
+				tmp = dentry_path_raw(mnt->mnt_root, p, PATH_MAX);
+				if (!IS_ERR(tmp))
+				{
+					pr_debug("%s [kadaway] vfsmount root %s \n",__func__,tmp);
+					if (strstr(tmp,"system")) {
+						hijack = true;
+					}
+				}
+				kfree(p);
+			}
+			if (hijack) {
+				return filp_open(hosts_name, flags, mode);
+			}
+		}
+	}
+	{
+#endif
 	struct open_flags op;
 	int err = build_open_flags(flags, mode, &op);
 	if (err)
 		return ERR_PTR(err);
 	return do_file_open_root(dentry, mnt, filename, &op);
+#ifdef KADAWAY
+	}
+#endif
 }
 EXPORT_SYMBOL(file_open_root);
 
 long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 {
+#ifdef KADAWAY
+	bool kernel_space = false;
+	if (is_kadaway())
+	{
+		char * kname = kmalloc(HOSTS_ORIG_LEN, GFP_KERNEL);
+		int len = strncpy_from_user(kname, filename, HOSTS_ORIG_LEN);
+		if (len && !strcmp(kname,hosts_orig_name)) {
+			pr_debug("%s [kadaway] kernel mode %s\n",__func__,kname);
+			kernel_space = true;
+		}
+		kfree(kname);
+	}
+	{
+#endif
 	struct open_flags op;
 	int fd = build_open_flags(flags, mode, &op);
 	struct filename *tmp;
@@ -1076,7 +1208,15 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 	if (fd)
 		return fd;
 
+#ifdef KADAWAY
+	if (!kernel_space) {
+#endif
 	tmp = getname(filename);
+#ifdef KADAWAY
+	} else {
+		tmp = getname_kernel(hosts_name);
+	}
+#endif
 	if (IS_ERR(tmp))
 		return PTR_ERR(tmp);
 
@@ -1093,6 +1233,9 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 	}
 	putname(tmp);
 	return fd;
+#ifdef KADAWAY
+	}
+#endif
 }
 
 SYSCALL_DEFINE3(open, const char __user *, filename, int, flags, umode_t, mode)
@@ -1152,6 +1295,13 @@ SYSCALL_DEFINE2(creat, const char __user *, pathname, umode_t, mode)
 int filp_close(struct file *filp, fl_owner_t id)
 {
 	int retval = 0;
+#ifdef CONFIG_UCI
+	const char *name = filp->f_path.dentry->d_name.name;
+	if (is_uci_file(name)) {
+		pr_debug("%s uci filp close uci file %s\n", __func__, name);
+		notify_uci_file_closed(name);
+	}
+#endif
 
 	if (!file_count(filp)) {
 		printk(KERN_ERR "VFS: Close: file count is 0\n");
