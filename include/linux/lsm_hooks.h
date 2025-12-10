@@ -1344,7 +1344,6 @@
  *	@field contains the field which relates to current LSM.
  *	@op contains the operator that will be used for matching.
  *	@rule points to the audit rule that will be checked against.
- *	@actx points to the audit context associated with the check.
  *	Return 1 if secid matches the rule, 0 if it does not, -ERRNO on failure.
  *
  * @audit_rule_free:
@@ -1764,8 +1763,7 @@ union security_list_options {
 	int (*audit_rule_init)(u32 field, u32 op, char *rulestr,
 				void **lsmrule);
 	int (*audit_rule_known)(struct audit_krule *krule);
-	int (*audit_rule_match)(u32 secid, u32 field, u32 op, void *lsmrule,
-				struct audit_context *actx);
+	int (*audit_rule_match)(u32 secid, u32 field, u32 op, void *lsmrule);
 	void (*audit_rule_free)(void *lsmrule);
 #endif /* CONFIG_AUDIT */
 
@@ -2042,6 +2040,18 @@ struct security_hook_list {
 } __randomize_layout;
 
 /*
+ * Security blob size or offset data.
+ */
+struct lsm_blob_sizes {
+	int	lbs_cred;
+	int	lbs_file;
+	int	lbs_inode;
+	int	lbs_ipc;
+	int	lbs_msg_msg;
+	int	lbs_task;
+};
+
+/*
  * Initializing a security_hook_list structure takes
  * up a lot of space in a source file. This macro takes
  * care of the common case and reduces the amount of
@@ -2055,6 +2065,19 @@ extern char *lsm_names;
 
 extern void security_add_hooks(struct security_hook_list *hooks, int count,
 				char *lsm);
+
+struct lsm_info {
+	const char *name;	/* Required. */
+	int (*init)(void);	/* Required. */
+	struct lsm_blob_sizes *blobs; /* Optional: for blob sharing. */
+};
+
+extern struct lsm_info __start_lsm_info[], __end_lsm_info[];
+
+#define DEFINE_LSM(lsm)							\
+	static struct lsm_info __lsm_##lsm				\
+		__used __section(.lsm_info.init)			\
+		__aligned(sizeof(unsigned long))
 
 #ifdef CONFIG_SECURITY_SELINUX_DISABLE
 /*
@@ -2097,6 +2120,13 @@ static inline void __init yama_add_hooks(void) { }
 void __init loadpin_add_hooks(void);
 #else
 static inline void loadpin_add_hooks(void) { };
+#endif
+
+extern int lsm_inode_alloc(struct inode *inode);
+
+#ifdef CONFIG_SECURITY
+void __init lsm_early_cred(struct cred *cred);
+void __init lsm_early_task(struct task_struct *task);
 #endif
 
 #endif /* ! __LINUX_LSM_HOOKS_H */

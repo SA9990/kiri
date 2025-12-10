@@ -433,6 +433,7 @@ extern int bioset_init_from_src(struct bio_set *bs, struct bio_set *src);
 extern struct bio *bio_alloc_bioset(gfp_t, unsigned int, struct bio_set *);
 extern void bio_put(struct bio *);
 
+extern void bio_clone_crypt_key(struct bio *dst, const struct bio *src);
 extern void __bio_clone_fast(struct bio *, struct bio *);
 extern struct bio *bio_clone_fast(struct bio *, gfp_t, struct bio_set *);
 
@@ -468,6 +469,7 @@ struct request_queue;
 extern int bio_phys_segments(struct request_queue *, struct bio *);
 
 extern int submit_bio_wait(struct bio *bio);
+extern void submit_bio_nowait(struct bio *bio);
 extern void bio_advance(struct bio *, unsigned);
 
 extern void bio_init(struct bio *bio, struct bio_vec *table,
