@@ -79,7 +79,7 @@ struct usb_ep *usb_ep_autoconfig_ss(
 
 	/* Second, look at endpoints until an unclaimed one looks usable */
 	list_for_each_entry (ep, &gadget->ep_list, ep_list) {
-		if (usb_gadget_ep_match_desc(gadget, ep, desc, ep_comp))
+		if (ep->ep_type != EP_TYPE_GSI && usb_gadget_ep_match_desc(gadget, ep, desc, ep_comp))
 			goto found_ep;
 	}
 
@@ -240,6 +240,7 @@ struct usb_ep *usb_ep_autoconfig_by_name(
 		pr_debug("Allocating ep address:%x\n", ep->address);
 		ep->desc = NULL;
 		ep->comp_desc = NULL;
+		ep->claimed = true;
 		return ep;
 	}
 
@@ -247,4 +248,4 @@ err:
 	pr_err("%s:error finding ep %s\n", __func__, ep_name);
 	return NULL;
 }
-EXPORT_SYMBOL_GPL(usb_ep_autoconfig_by_name);
+EXPORT_SYMBOL(usb_ep_autoconfig_by_name);

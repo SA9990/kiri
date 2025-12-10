@@ -30,7 +30,6 @@
 #include <linux/slab.h>
 #include <linux/wakeup_reason.h>
 
-
 #include <linux/irqchip.h>
 #include <linux/irqchip/arm-gic-common.h>
 #include <linux/irqchip/arm-gic-v3.h>
@@ -41,8 +40,13 @@
 #include <asm/smp_plat.h>
 #include <asm/virt.h>
 
+#include <linux/syscore_ops.h>
+
 #include "irq-gic-common.h"
 
+//ASUS_BSP +++ yujoe
+int gic_irq_cnt,gic_resume_irq;//[Power]Add these values to save IRQ's counts and number
+//ASUS_BSP ---
 struct redist_region {
 	void __iomem		*redist_base;
 	phys_addr_t		phys_base;
@@ -334,6 +338,139 @@ static int gic_irq_set_vcpu_affinity(struct irq_data *d, void *vcpu)
 	return 0;
 }
 
+#ifdef CONFIG_PM
+
+static int gic_suspend(void)
+{
+	return 0;
+}
+
+/*
+ * gic_show_pending_irq - Shows the pending interrupts
+ * Note: Interrupts should be disabled on the cpu from which
+ * this is called to get accurate list of pending interrupts.
+ */
+void gic_show_pending_irqs(void)
+{
+	void __iomem *base;
+	u32 pending, enabled;
+	unsigned int j;
+
+	base = gic_data.dist_base;
+	for (j = 0; j * 32 < gic_data.irq_nr; j++) {
+		enabled = readl_relaxed(base +
+					GICD_ISENABLER + j * 4);
+		pending = readl_relaxed(base +
+					GICD_ISPENDR + j * 4);
+		pr_err("Pending and enabled irqs[%d] %x %x\n", j,
+				pending, enabled);
+
+	}
+}
+
+/*AS-K Log Modem Wake Up QMI Info+*/
+#define MODEM_IRQ_VALUE 664
+static int modem_resume_irq_flag = 0;
+int modem_resume_irq_flag_function(void) {
+    if( modem_resume_irq_flag == 1 ) {
+        modem_resume_irq_flag = 0;
+        return 1;
+    }
+    return 0;
+}
+EXPORT_SYMBOL(modem_resume_irq_flag_function);
+/*AS-K Log Modem Wake Up QMI Info-*/
+
+/*AS-K Log Wake Up IP Address Info+*/
+#define IPA_IRQ_VALUE 107
+static int ipa_resume_irq_flag = 0;
+int ipa_resume_irq_flag_function(void) {
+    if( ipa_resume_irq_flag == 1 ) {
+        ipa_resume_irq_flag = 0;
+        return 1;
+    }
+    return 0;
+}
+EXPORT_SYMBOL(ipa_resume_irq_flag_function);
+/*AS-K Log Wake Up IP Address Info-*/
+
+static void gic_show_resume_irq(struct gic_chip_data *gic)
+{
+	unsigned int i;
+	u32 enabled;
+	u32 pending[32];
+	void __iomem *base = gic_data.dist_base;
+
+//ASUS_BSP +++ [PM]reset IRQ count and IRQ number every time.
+	gic_resume_irq=0;
+	gic_irq_cnt=0;
+//ASUS_BSP --- [PM]reset IRQ count and IRQ number every time.
+	if (!msm_show_resume_irq_mask)
+		return;
+
+	for (i = 0; i * 32 < gic->irq_nr; i++) {
+		enabled = readl_relaxed(base + GICD_ICENABLER + i * 4);
+		pending[i] = readl_relaxed(base + GICD_ISPENDR + i * 4);
+		pending[i] &= enabled;
+	}
+
+	for (i = find_first_bit((unsigned long *)pending, gic->irq_nr);
+	     i < gic->irq_nr;
+	     i = find_next_bit((unsigned long *)pending, gic->irq_nr, i+1)) {
+		unsigned int irq = irq_find_mapping(gic->domain, i);
+		struct irq_desc *desc = irq_to_desc(irq);
+		const char *name = "null";
+
+		if (desc == NULL)
+			name = "stray irq";
+		else if (desc->action && desc->action->name)
+			name = desc->action->name;
+
+		pr_warn("[PM] %s: %d triggered %s\n", __func__, irq, name);
+
+		/*AS-K Log Modem Wake Up QMI Info+*/
+		if(irq == MODEM_IRQ_VALUE) {
+			modem_resume_irq_flag = 1;
+                }
+		/*AS-K Log Modem Wake Up QMI Info-*/
+
+		/*AS-K Log Wake Up IP Address Info+*/
+		if(irq == IPA_IRQ_VALUE) {
+			ipa_resume_irq_flag = 1;
+                }
+		/*AS-K Log Wake Up IP Address Info-*/
+
+//ASUS_BSP +++ [PM]save IRQ's counts and number
+		gic_resume_irq = irq;
+		gic_irq_cnt++;
+//ASUS_BSP --- [PM]save IRQ's counts and number
+	}
+}
+
+static void gic_resume_one(struct gic_chip_data *gic)
+{
+	gic_show_resume_irq(gic);
+}
+
+static void gic_resume(void)
+{
+	gic_resume_one(&gic_data);
+}
+
+static struct syscore_ops gic_syscore_ops = {
+	.suspend = gic_suspend,
+	.resume = gic_resume,
+};
+
+static int __init gic_init_sys(void)
+{
+	register_syscore_ops(&gic_syscore_ops);
+	return 0;
+}
+arch_initcall(gic_init_sys);
+
+#endif
+
 static u64 gic_mpidr_to_affinity(unsigned long mpidr)
 {
 	u64 aff;
@@ -490,10 +627,6 @@ static int __gic_populate_rdist(struct redist_region *region, void __iomem *ptr)
 		gic_data_rdist_rd_base() = ptr;
 		gic_data_rdist()->phys_base = region->phys_base + offset;
 
-		pr_info("CPU%d: found redistributor %lx region %d:%pa\n",
-			smp_processor_id(), mpidr,
-			(int)(region - gic_data.redist_regions),
-			&gic_data_rdist()->phys_base);
 		return 0;
 	}
 
@@ -678,7 +811,8 @@ static void gic_cpu_init(void)
 	gic_cpu_config(rbase, gic_redist_wait_for_rwp);
 
 	/* Give LPIs a spin */
-	if (IS_ENABLED(CONFIG_ARM_GIC_V3_ITS) && gic_dist_supports_lpis())
+	if (IS_ENABLED(CONFIG_ARM_GIC_V3_ITS) && gic_dist_supports_lpis() &&
+					!IS_ENABLED(CONFIG_ARM_GIC_V3_ACL))
 		its_cpu_init();
 
 	/* initialise system registers */
@@ -832,6 +966,9 @@ static bool gic_dist_security_disabled(void)
 static int gic_cpu_pm_notifier(struct notifier_block *self,
 			       unsigned long cmd, void *v)
 {
+	if (from_suspend)
+		return NOTIFY_OK;
+
 	if (cmd == CPU_PM_EXIT) {
 		if (gic_dist_security_disabled())
 			gic_enable_redist(true);
@@ -1131,7 +1268,8 @@ static int __init gic_init_bases(void __iomem *dist_base,
 
 	gic_update_vlpi_properties();
 
-	if (IS_ENABLED(CONFIG_ARM_GIC_V3_ITS) && gic_dist_supports_lpis())
+	if (IS_ENABLED(CONFIG_ARM_GIC_V3_ITS) && gic_dist_supports_lpis() &&
+			!IS_ENABLED(CONFIG_ARM_GIC_V3_ACL))
 		its_init(handle, &gic_data.rdists, gic_data.domain);
 
 	gic_smp_init();

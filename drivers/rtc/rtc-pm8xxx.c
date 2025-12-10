@@ -1,14 +1,8 @@
-/* Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Copyright (c) 2010-2011, 2020-2021, The Linux Foundation. All rights reserved.
  */
+
 #include <linux/of.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -28,6 +22,7 @@
 /* RTC_CTRL register bit fields */
 #define PM8xxx_RTC_ENABLE		BIT(7)
 #define PM8xxx_RTC_ALARM_CLEAR		BIT(0)
+#define PM8xxx_RTC_ALARM_ENABLE		BIT(7)
 
 #define NUM_8_BIT_RTC_REGS		0x4
 
@@ -179,6 +174,52 @@ rtc_rw_fail:
 	return rc;
 }
 
+//[+++]ASUS_BSP for battery safety Upgrade and battery health
+struct pm8xxx_rtc *asus_rtc_dd;
+unsigned long asus_qpnp_rtc_read_time(void)
+{
+	int rc=-1;
+	u8 value[NUM_8_BIT_RTC_REGS];
+	unsigned long secs;
+	unsigned int reg;
+	const struct pm8xxx_rtc_regs *regs = asus_rtc_dd->regs;
+	
+	if(!asus_rtc_dd){
+		pr_err("asus rtc add is NULL!\n");
+		return rc;
+	}
+
+	rc = regmap_bulk_read(asus_rtc_dd->regmap, regs->read, value, sizeof(value));
+	if (rc) {
+		pr_err("RTC read data register failed\n");
+		return rc;
+	}
+
+	/*
+	 * Read the LSB again and check if there has been a carry over.
+	 * If there is, redo the read operation.
+	 */
+	rc = regmap_read(asus_rtc_dd->regmap, regs->read, &reg);
+	if (rc < 0) {
+		pr_err("RTC read data register failed\n");
+		return rc;
+	}
+
+	if (unlikely(reg < value[0])) {
+		rc = regmap_bulk_read(asus_rtc_dd->regmap, regs->read,
+				      value, sizeof(value));
+		if (rc) {
+			pr_err("RTC read data register failed\n");
+			return rc;
+		}
+	}
+
+	secs = value[0] | (value[1] << 8) | (value[2] << 16) | (value[3] << 24);
+
+	return secs;
+}
+//[+++]ASUS_BSP for battery safety Upgrade and battery health
+
 static int pm8xxx_rtc_read_time(struct device *dev, struct rtc_time *tm)
 {
 	int rc;
@@ -305,6 +346,14 @@ static int pm8xxx_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alarm)
 		alarm->time.tm_sec, alarm->time.tm_mday,
 		alarm->time.tm_mon, alarm->time.tm_year);
 
+	rc = regmap_bulk_read(rtc_dd->regmap, regs->alarm_ctrl, value, 1);
+	if (rc) {
+		dev_err(dev, "Read from ALARM CTRL1 failed\n");
+		return rc;
+	}
+
+	alarm->enabled = !!(value[0] & PM8xxx_RTC_ALARM_ENABLE);
+
 	return 0;
 }
 
@@ -315,6 +364,7 @@ static int pm8xxx_rtc_alarm_irq_enable(struct device *dev, unsigned int enable)
 	struct pm8xxx_rtc *rtc_dd = dev_get_drvdata(dev);
 	const struct pm8xxx_rtc_regs *regs = rtc_dd->regs;
 	unsigned int ctrl_reg;
+	u8 value[NUM_8_BIT_RTC_REGS] = {0};
 
 	spin_lock_irqsave(&rtc_dd->ctrl_reg_lock, irq_flags);
 
@@ -331,6 +381,16 @@ static int pm8xxx_rtc_alarm_irq_enable(struct device *dev, unsigned int enable)
 	if (rc) {
 		dev_err(dev, "Write to RTC control register failed\n");
 		goto rtc_rw_fail;
+	}
+
+	/* Clear Alarm register */
+	if (!enable) {
+		rc = regmap_bulk_write(rtc_dd->regmap, regs->alarm_rw, value,
+					sizeof(value));
+		if (rc) {
+			dev_err(dev, "Write to RTC ALARM register failed\n");
+			goto rtc_rw_fail;
+		}
 	}
 
 rtc_rw_fail:
@@ -446,6 +506,26 @@ static const struct pm8xxx_rtc_regs pm8941_regs = {
 	.alarm_en	= BIT(7),
 };
 
+static const struct pm8xxx_rtc_regs pmk8350_regs = {
+	.ctrl		= 0x6146,
+	.write		= 0x6140,
+	.read		= 0x6148,
+	.alarm_rw	= 0x6240,
+	.alarm_ctrl	= 0x6246,
+	.alarm_ctrl2	= 0x6248,
+	.alarm_en	= BIT(7),
+};
+
+static const struct pm8xxx_rtc_regs pm8916_regs = {
+	.ctrl		= 0x6046,
+	.write		= 0x6040,
+	.read		= 0x6048,
+	.alarm_rw	= 0x6140,
+	.alarm_ctrl	= 0x6146,
+	.alarm_ctrl2	= 0x6148,
+	.alarm_en	= BIT(7),
+};
+
 /*
  * Hardcoded RTC bases until IORESOURCE_REG mapping is figured out
  */
@@ -454,10 +534,13 @@ static const struct of_device_id pm8xxx_id_table[] = {
 	{ .compatible = "qcom,pm8018-rtc", .data = &pm8921_regs },
 	{ .compatible = "qcom,pm8058-rtc", .data = &pm8058_regs },
 	{ .compatible = "qcom,pm8941-rtc", .data = &pm8941_regs },
+	{ .compatible = "qcom,pmk8350-rtc", .data = &pmk8350_regs },
+	{ .compatible = "qcom,pm8916-rtc", .data = &pm8916_regs },
 	{ },
 };
 MODULE_DEVICE_TABLE(of, pm8xxx_id_table);
 
+bool rtc_probe_done = false; //ASUS_BSP for battery safety Upgrade and battery health
 static int pm8xxx_rtc_probe(struct platform_device *pdev)
 {
 	int rc;
@@ -520,6 +603,11 @@ static int pm8xxx_rtc_probe(struct platform_device *pdev)
 		return rc;
 	}
 
+//[+++]ASUS_BSP for battery safety Upgrade and battery health
+	asus_rtc_dd = rtc_dd;
+	rtc_probe_done = true;
+//[---]ASUS_BSP for battery safety Upgrade and battery health
+	
 	dev_dbg(&pdev->dev, "Probe success !!\n");
 
 	return 0;
