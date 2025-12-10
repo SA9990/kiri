@@ -101,6 +101,17 @@ static inline void __raw_writel(u32 val, volatile void __iomem *addr)
 		     : : "Qo" (*(volatile u32 __force *)addr), "r" (val));
 }
 
+#define __raw_writeq __raw_writeq
+static inline void __raw_writeq(u64 val, volatile void __iomem *addr)
+{
+	register u64 v asm("r2");
+
+	v = val;
+
+	asm volatile("strd %1, %0"
+		     : : "Qo" (*(volatile u64 __force *)addr), "r" (val));
+}
+
 #define __raw_readb __raw_readb
 static inline u8 __raw_readb(const volatile void __iomem *addr)
 {
@@ -118,6 +129,17 @@ static inline u32 __raw_readl(const volatile void __iomem *addr)
 	asm volatile("ldr %0, %1"
 		     : "=r" (val)
 		     : "Qo" (*(volatile u32 __force *)addr));
+	return val;
+}
+
+#define __raw_readq __raw_readq
+static inline u64 __raw_readq(const volatile void __iomem *addr)
+{
+	register u64 val asm ("r2");
+
+	asm volatile("ldrd %1, %0"
+		     : "+Qo" (*(volatile u64 __force *)addr),
+		       "=r" (val));
 	return val;
 }
 
@@ -300,18 +322,25 @@ extern void _memset_io(volatile void __iomem *, int, size_t);
 					__raw_readw(c)); __r; })
 #define readl_relaxed(c) ({ u32 __r = le32_to_cpu((__force __le32) \
 					__raw_readl(c)); __r; })
+#define readq_relaxed(c) ({ u64 __r = le64_to_cpu((__force __le64) \
+					__raw_readq(c)); __r; })
 
-#define writeb_relaxed(v,c)	__raw_writeb(v,c)
-#define writew_relaxed(v,c)	__raw_writew((__force u16) cpu_to_le16(v),c)
-#define writel_relaxed(v,c)	__raw_writel((__force u32) cpu_to_le32(v),c)
+
+#define writeb_relaxed(v, c)	__raw_writeb(v, c)
+#define writew_relaxed(v, c)	__raw_writew((__force u16) cpu_to_le16(v), c)
+#define writel_relaxed(v, c)	__raw_writel((__force u32) cpu_to_le32(v), c)
+#define writeq_relaxed(v, c)	__raw_writeq((__force u64) cpu_to_le64(v), c)
 
 #define readb(c)		({ u8  __v = readb_relaxed(c); __iormb(); __v; })
 #define readw(c)		({ u16 __v = readw_relaxed(c); __iormb(); __v; })
 #define readl(c)		({ u32 __v = readl_relaxed(c); __iormb(); __v; })
+#define readq(c)		({ u64 __v = readq_relaxed(c)\
+					; __iormb(); __v; })
 
 #define writeb(v,c)		({ __iowmb(); writeb_relaxed(v,c); })
 #define writew(v,c)		({ __iowmb(); writew_relaxed(v,c); })
 #define writel(v,c)		({ __iowmb(); writel_relaxed(v,c); })
+#define writeq(v, c)		({ __iowmb(); writeq_relaxed(v, c); })
 
 #define readsb(p,d,l)		__raw_readsb(p,d,l)
 #define readsw(p,d,l)		__raw_readsw(p,d,l)
@@ -419,6 +448,31 @@ void __iomem *ioremap_wc(resource_size_t res_cookie, size_t size);
 
 void iounmap(volatile void __iomem *iomem_cookie);
 #define iounmap iounmap
+/*
+ * io{read,write}{8,16,32,64} macros
+ */
+#ifndef ioread8
+#define ioread8(p)	({ unsigned int __v = __raw_readb(p); __iormb(); __v; })
+#define ioread16(p)	({ unsigned int __v = le16_to_cpu((__force __le16)\
+				__raw_readw(p)); __iormb(); __v; })
+#define ioread32(p)	({ unsigned int __v = le32_to_cpu((__force __le32)\
+				__raw_readl(p)); __iormb(); __v; })
+#define ioread64(p)	({ unsigned int __v = le64_to_cpu((__force __le64)\
+				__raw_readq(p)); __iormb(); __v; })
+
+#define ioread64be(p)	({ unsigned int __v = be64_to_cpu((__force __be64)\
+				__raw_readq(p)); __iormb(); __v; })
+
+#define iowrite8(v, p)	({ __iowmb(); __raw_writeb(v, p); })
+#define iowrite16(v, p)	({ __iowmb(); __raw_writew((__force __u16)\
+				cpu_to_le16(v), p); })
+#define iowrite32(v, p)	({ __iowmb(); __raw_writel((__force __u32)\
+				cpu_to_le32(v), p); })
+#define iowrite64(v, p)	({ __iowmb(); __raw_writeq((__force __u64)\
+				cpu_to_le64(v), p); })
+
+#define iowrite64be(v, p) ({ __iowmb(); __raw_writeq((__force __u64)\
+				cpu_to_be64(v), p); })
 
 void *arch_memremap_wb(phys_addr_t phys_addr, size_t size);
 #define arch_memremap_wb arch_memremap_wb
@@ -439,6 +493,7 @@ extern void __iomem *ioport_map(unsigned long port, unsigned int nr);
 #ifndef ioport_unmap
 #define ioport_unmap ioport_unmap
 extern void ioport_unmap(void __iomem *addr);
+#endif
 #endif
 
 struct pci_dev;
