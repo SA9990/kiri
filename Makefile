@@ -501,7 +501,11 @@ endif
 
 ifeq ($(cc-name),clang)
 ifneq ($(CROSS_COMPILE),)
-CLANG_FLAGS	+= --target=$(notdir $(CROSS_COMPILE:%-=%))
+CLANG_TRIPLE	?= $(CROSS_COMPILE)
+CLANG_FLAGS	+= --target=$(notdir $(CLANG_TRIPLE:%-=%))
+ifeq ($(shell $(srctree)/scripts/clang-android.sh $(CC) $(CLANG_FLAGS)), y)
+$(error "Clang with Android --target detected. Did you specify CLANG_TRIPLE?")
+endif
 GCC_TOOLCHAIN_DIR := $(dir $(shell which $(CROSS_COMPILE)elfedit))
 CLANG_FLAGS	+= --prefix=$(GCC_TOOLCHAIN_DIR)$(notdir $(CROSS_COMPILE))
 GCC_TOOLCHAIN	:= $(realpath $(GCC_TOOLCHAIN_DIR)/..)
@@ -512,7 +516,11 @@ endif
 ifneq ($(LLVM_IAS),1)
 CLANG_FLAGS	+= -no-integrated-as
 endif
+CLANG_FLAGS	+= $(call cc-option, -Wno-misleading-indentation)
+CLANG_FLAGS	+= $(call cc-option, -Wno-bool-operation)
+CLANG_FLAGS	+= $(call cc-option, -Wno-void-pointer-to-enum-cast)
 CLANG_FLAGS	+= -Werror=unknown-warning-option
+CLANG_FLAGS	+= $(call cc-option, -Wno-unsequenced)
 KBUILD_CFLAGS	+= $(CLANG_FLAGS)
 KBUILD_AFLAGS	+= $(CLANG_FLAGS)
 export CLANG_FLAGS
@@ -595,7 +603,7 @@ export KBUILD_MODULES KBUILD_BUILTIN
 ifeq ($(KBUILD_EXTMOD),)
 # Objects we will link into vmlinux / subdirs we need to visit
 init-y		:= init/
-drivers-y	:= drivers/ sound/ firmware/
+drivers-y	:= drivers/ sound/ firmware/ techpack/ techpack/data/drivers/ techpack/display/ techpack/video/
 net-y		:= net/
 libs-y		:= lib/
 core-y		:= usr/
@@ -685,17 +693,33 @@ KBUILD_CFLAGS	+= $(call cc-disable-warning, address-of-packed-member)
 ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
 KBUILD_CFLAGS   += -Os
 else
-KBUILD_CFLAGS   += -O2
+KBUILD_CFLAGS   += -O3
 endif
 
 # Tell gcc to never replace conditional load with a non-conditional one
 KBUILD_CFLAGS	+= $(call cc-option,--param=allow-store-data-races=0)
 KBUILD_CFLAGS	+= $(call cc-option,-fno-allow-store-data-races)
 
+# The compiler may "libcall optimize" certain function calls into the below
+# functions, for architectures that don't use -ffreestanding. If we don't plan
+# to provide implementations of these routines, then prevent the compiler from
+# emitting calls to what will be undefined symbols.
+KBUILD_CFLAGS	+= -fno-builtin-stpcpy
+
 # check for 'asm goto'
 ifeq ($(call shell-cached,$(CONFIG_SHELL) $(srctree)/scripts/gcc-goto.sh $(CC) $(KBUILD_CFLAGS)), y)
 	KBUILD_CFLAGS += -DCC_HAVE_ASM_GOTO
 	KBUILD_AFLAGS += -DCC_HAVE_ASM_GOTO
+endif
+
+ifneq ($(ASUS_BUILD_NUMBER),)
+	KBUILD_CPPFLAGS += -DASUS_SW_VER=\"$(TARGET_SKU)-$(ASUS_BUILD_NUMBER)\"
+else
+	KBUILD_CPPFLAGS += -DASUS_SW_VER=\"$(TARGET_SKU)-$(ASUS_BUILD_PROJECT)_ENG\"
+endif
+
+ifneq ($(ASUS_BUILD_NUMBER_CHIPCODE),)
+	KBUILD_CPPFLAGS += -DASUS_SW_VER_CHIP=\"$(TARGET_SKU)-$(ASUS_BUILD_NUMBER_CHIPCODE)\"
 endif
 
 include scripts/Makefile.kcov
@@ -722,9 +746,18 @@ stackp-flags-$(CONFIG_STACKPROTECTOR_STRONG)      := -fstack-protector-strong
 KBUILD_CFLAGS += $(stackp-flags-y)
 
 ifeq ($(cc-name),clang)
+KBUILD_CFLAGS += $(CLANG_TARGET) $(CLANG_GCC_TC) -meabi gnu
+KBUILD_AFLAGS += $(CLANG_TARGET) $(CLANG_GCC_TC)
 KBUILD_CPPFLAGS += $(call cc-option,-Qunused-arguments,)
 KBUILD_CFLAGS += $(call cc-disable-warning, format-invalid-specifier)
 KBUILD_CFLAGS += $(call cc-disable-warning, gnu)
+KBUILD_CFLAGS += $(call cc-disable-warning, duplicate-decl-specifier)
+KBUILD_CFLAGS += -Wno-asm-operand-widths
+KBUILD_CFLAGS += -Wno-initializer-overrides
+KBUILD_CFLAGS += $(call cc-option, -Wno-undefined-optimized)
+KBUILD_CFLAGS += $(call cc-option, -Wno-tautological-constant-out-of-range-compare)
+KBUILD_CFLAGS += $(call cc-option, -mllvm -disable-struct-const-merge)
+
 # Quiet clang warning: comparison of unsigned expression < 0 is always false
 KBUILD_CFLAGS += $(call cc-disable-warning, tautological-compare)
 # CLANG uses a _MergedGlobals as optimization, but this breaks modpost, as the
@@ -767,6 +800,8 @@ KBUILD_CFLAGS	+= -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-f
 endif
 
 KBUILD_CFLAGS   += $(call cc-option, -fno-var-tracking-assignments)
+
+KBUILD_CFLAGS   += $(call cc-option, -Wvla)
 
 ifdef CONFIG_DEBUG_INFO
 ifdef CONFIG_DEBUG_INFO_SPLIT
@@ -963,6 +998,29 @@ include scripts/Makefile.ubsan
 KBUILD_CPPFLAGS += $(ARCH_CPPFLAGS) $(KCPPFLAGS)
 KBUILD_AFLAGS   += $(ARCH_AFLAGS)   $(KAFLAGS)
 KBUILD_CFLAGS   += $(ARCH_CFLAGS)   $(KCFLAGS)
+
+ifdef CONFIG_MACH_ASUS_ZS670KS
+KBUILD_CPPFLAGS += -DZS670KS=1
+endif
+
+ifdef CONFIG_MACH_ASUS_ZS661KS
+KBUILD_CPPFLAGS += -DASUS_ZS661KS_PROJECT=1
+endif
+
+# Add ASUS build option to KBUILD_CPPFLAGS
+ifneq ($(TARGET_BUILD_VARIANT),user)
+ifeq ($(ASUS_FTM),y)
+KBUILD_CPPFLAGS += -DASUS_FTM_BUILD=1
+else
+KBUILD_CPPFLAGS += -DASUS_USERDEBUG_BUILD=1
+endif
+else
+KBUILD_CPPFLAGS += -DASUS_USER_BUILD=1
+endif
+
+ifeq ($(ASUS_DXO),y)
+KBUILD_CPPFLAGS += -DASUS_DXO=1
+endif
 
 # Use --build-id when available.
 LDFLAGS_BUILD_ID := $(call ld-option, --build-id)
@@ -1242,6 +1300,12 @@ else
 endif
 endif
 
+ifdef cfi-flags
+  ifeq ($(call cc-option, $(cfi-flags)),)
+	@echo Cannot use CONFIG_CFI: $(cfi-flags) not supported by compiler >&2 && exit 1
+  endif
+endif
+
 # Generate some files
 # ---------------------------------------------------------------------------
 
@@ -1309,6 +1373,9 @@ headers_install: __headers
 	  $(error Headers not exportable for the $(SRCARCH) architecture))
 	$(Q)$(MAKE) $(hdr-inst)=include/uapi dst=include
 	$(Q)$(MAKE) $(hdr-inst)=arch/$(SRCARCH)/include/uapi $(hdr-dst)
+	$(Q)$(MAKE) $(hdr-inst)=techpack/camera/include/uapi dst=techpack/camera/include
+	$(Q)$(MAKE) $(hdr-inst)=techpack/audio/include/uapi dst=techpack/audio/include
+
 
 PHONY += headers_check_all
 headers_check_all: headers_install_all
@@ -1318,6 +1385,8 @@ PHONY += headers_check
 headers_check: headers_install
 	$(Q)$(MAKE) $(hdr-inst)=include/uapi dst=include HDRCHECK=1
 	$(Q)$(MAKE) $(hdr-inst)=arch/$(SRCARCH)/include/uapi $(hdr-dst) HDRCHECK=1
+	$(Q)$(MAKE) $(hdr-inst)=techpack/camera/include/uapi dst=techpack/camera/include HDRCHECK=1
+	$(Q)$(MAKE) $(hdr-inst)=techpack/audio/include/uapi dst=techpack/audio/include HDRCHECK=1
 
 # ---------------------------------------------------------------------------
 # Kernel selftest
