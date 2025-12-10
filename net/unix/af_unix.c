@@ -127,6 +127,7 @@ DEFINE_SPINLOCK(unix_table_lock);
 EXPORT_SYMBOL_GPL(unix_table_lock);
 static atomic_long_t unix_nr_socks;
 
+extern spinlock_t unix_gc_lock;
 
 static struct hlist_head *unix_sockets_unbound(void *addr)
 {

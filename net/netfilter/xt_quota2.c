@@ -109,11 +109,13 @@ static void quota2_log(unsigned int hooknum,
 	memset(pm, 0, sizeof(*pm));
 	if (skb->tstamp == 0)
 		__net_timestamp((struct sk_buff *)skb);
+
 	pm->hook = hooknum;
 	if (prefix != NULL)
 		strlcpy(pm->prefix, prefix, sizeof(pm->prefix));
 	if (in)
 		strlcpy(pm->indev_name, in->name, sizeof(pm->indev_name));
+
 	if (out)
 		strlcpy(pm->outdev_name, out->name, sizeof(pm->outdev_name));
 
